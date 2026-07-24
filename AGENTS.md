@@ -1,8 +1,22 @@
 # Repository Guidelines
 
+## Required Standards
+- `project-standards:project-foundation` applies to all work in this repository.
+- `project-standards:project-instruction-developer` applies to instruction artifacts.
+- `project-standards:project-documentation-developer` applies to `DESIGN.md`.
+- `project-standards:python-developer`, `project-standards:python-cli-developer`, and `project-standards:pytest-developer` apply to Python code, entrypoints, and tests.
+- `project-standards:runtime-config-developer` applies to environment-backed runtime configuration.
+- `project-standards:http-api-client-developer` applies to outbound HTTP client boundaries.
+- `project-standards:docker-compose-developer` and `project-standards:kubernetes-developer` apply to container and Kubernetes deployment artifacts.
+- `workflow-container-agent-tools:workflow-container-developer` applies to workflow-container runtime integration.
+
+If one required provider skill is unavailable, continue read-only discovery only and do not mutate this repository until the provider is restored.
+
+Active task pairs live only under the ignored `.spec/` root.
+
 ## Scope
 - This repository owns the reusable browser runtime capability only.
-- Shared workflow-container ecosystem authoring and code quality rules live in the `workflow-container-tools` plugin reference `references/workflow-container-authoring.md`.
+- Shared workflow-container ecosystem authoring and code quality rules belong to `workflow-container-agent-tools:workflow-container-developer`.
 - Do not add domain-specific or workflow-specific business logic.
 - Keep the runtime boundary explicit: this repository owns Playwright execution and profiles, `vpn-runtime` owns VPN connectivity and SOCKS5 gateways, and callers own domain extraction behavior.
 - The Playwright MCP runtime must expose one runtime-owned browser stack; consumers may select logical run-local profile names through the workflow contract but must not configure direct `@playwright/mcp`, direct `npx`, physical profile paths, profile-copy operations, or caller-owned browser flags as replacements for this stack.
@@ -20,4 +34,4 @@
 ## Verification
 - Run `python -m pytest -q` after Python behavior changes.
 - Run `python -m compileall browser_runtime` before handoff.
-- Re-read `README.md` and `doc/design/browser-runtime.md` after documentation changes that affect runtime boundaries.
+- Re-read `README.md` and `DESIGN.md` after documentation changes that affect runtime boundaries.

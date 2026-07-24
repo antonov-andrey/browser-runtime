@@ -1,4 +1,4 @@
-# Browser Runtime Design
+# Browser Runtime
 
 ## Purpose
 
