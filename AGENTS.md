@@ -8,13 +8,29 @@
 - [Verification](#verification)
 
 ## Required Standards
-- `project-standards:project-foundation` applies to all work in this repository.
-- `project-standards:project-instruction-developer` applies to instruction artifacts.
-- `project-standards:project-documentation-developer` applies to `DESIGN.md`.
-- `project-standards:python-developer`, `project-standards:python-cli-developer`, and `project-standards:pytest-developer` apply to Python code, entrypoints, and tests.
-- `project-standards:runtime-config-developer` applies to environment-backed runtime configuration.
-- `project-standards:http-api-client-developer` applies to outbound HTTP client boundaries.
-- `project-standards:docker-compose-developer` and `project-standards:kubernetes-developer` apply to container and Kubernetes deployment artifacts.
+
+- `project-standards:aws-cloudformation-developer`
+- `project-standards:docker-compose-developer`
+- `project-standards:http-api-client-developer`
+- `project-standards:kubernetes-developer`
+- `project-standards:legacy-python-maintainer`
+- `project-standards:project-documentation-developer`
+- `project-standards:project-foundation`
+- `project-standards:project-instruction-developer`
+- `project-standards:project-standard-audit`
+- `project-standards:project-standardize`
+- `project-standards:pytest-developer`
+- `project-standards:python-cli-developer`
+- `project-standards:python-developer`
+- `project-standards:python-logging-developer`
+- `project-standards:python-retry-developer`
+- `project-standards:react-ui-developer`
+- `project-standards:rest-api-server-developer`
+- `project-standards:runtime-config-developer`
+- `project-standards:sqlalchemy-developer`
+- `project-standards:submodule-developer`
+- `project-standards:typescript-developer`
+- `project-standards:zitadel-developer`
 - `workflow-container-agent-tools:workflow-container-developer` applies to workflow-container runtime integration.
 
 If one required provider skill is unavailable, continue read-only discovery only and do not mutate this repository until the provider is restored.
