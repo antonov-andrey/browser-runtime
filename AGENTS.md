@@ -34,8 +34,6 @@
 
 If one required provider skill is unavailable, continue read-only discovery only and do not mutate this repository until the provider is restored.
 
-Active task pairs live only under the ignored `.spec/` root.
-
 ## Scope
 - This repository owns the reusable browser runtime capability only.
 - Shared workflow-container ecosystem authoring and code quality rules belong to `workflow-container-agent-tools:workflow-container-developer`.
