@@ -18,7 +18,6 @@
 - `project-standards:project-foundation`
 - `project-standards:project-instruction-developer`
 - `project-standards:project-standard-audit`
-- `project-standards:project-standardize`
 - `project-standards:pytest-developer`
 - `project-standards:python-cli-developer`
 - `project-standards:python-developer`
