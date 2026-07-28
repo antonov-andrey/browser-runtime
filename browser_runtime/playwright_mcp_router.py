@@ -26,7 +26,6 @@ from browser_runtime.config import (
 from browser_runtime.playwright_mcp import (
     DEFAULT_ACTION_TIMEOUT_MS,
     DEFAULT_ALLOWED_HOST_LIST,
-    DEFAULT_BROWSER_CHANNEL,
     DEFAULT_MCP_HOST,
     DEFAULT_PORT,
     DEFAULT_READINESS_TIMEOUT_SECONDS,
@@ -563,7 +562,6 @@ def _args_parse() -> argparse.Namespace:
         "--allowed-hosts", default=DEFAULT_ALLOWED_HOST_LIST, dest="allowed_host_list", type=_allowed_host_list_parse
     )
     parser.add_argument("--backend-runtime-root-path", default=_DEFAULT_MCP_BACKEND_RUNTIME_ROOT_PATH, type=Path)
-    parser.add_argument("--browser-channel", default=DEFAULT_BROWSER_CHANNEL)
     parser.add_argument("--candidate-root-path", default=_DEFAULT_CANDIDATE_ROOT_PATH, type=Path)
     parser.add_argument("--secret-root-path", required=True, type=Path)
     parser.add_argument("--host", default="0.0.0.0")

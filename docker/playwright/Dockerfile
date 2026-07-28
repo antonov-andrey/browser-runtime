@@ -1,7 +1,8 @@
 ARG PLAYWRIGHT_IMAGE=python:3.14-bookworm
 FROM ${PLAYWRIGHT_IMAGE}
 
-ENV NPM_CONFIG_UPDATE_NOTIFIER=false
+ENV NPM_CONFIG_UPDATE_NOTIFIER=false \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 WORKDIR /app
 
@@ -10,7 +11,7 @@ RUN apt-get update \
     && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && npm install -g npm@11.18.0 @playwright/mcp@0.0.77 playwright@1.61.1 \
-    && playwright install --with-deps chrome \
+    && playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml ./

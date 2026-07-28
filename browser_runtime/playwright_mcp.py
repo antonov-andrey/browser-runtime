@@ -24,7 +24,6 @@ from browser_runtime.playwright_profile import playwright_profile_materialize
 
 DEFAULT_ACTION_TIMEOUT_MS = 30000
 DEFAULT_ALLOWED_HOST_LIST = ["localhost", "127.0.0.1"]
-DEFAULT_BROWSER_CHANNEL = "chrome"
 DEFAULT_BACKEND_STOP_TIMEOUT_SECONDS = 10
 DEFAULT_MCP_CONFIG_PATH = Path("/runtime/playwright_mcp/config.json")
 DEFAULT_MCP_EXECUTABLE_NAME = "playwright-mcp"
@@ -46,7 +45,6 @@ class PlaywrightMcpConfig(BaseModel):
 
     action_timeout_ms: int = Field(default=DEFAULT_ACTION_TIMEOUT_MS, ge=1)
     allowed_host_list: list[str] = Field(default_factory=lambda: list(DEFAULT_ALLOWED_HOST_LIST))
-    browser_channel: str = DEFAULT_BROWSER_CHANNEL
     secret_root_path: Path
     host: str = DEFAULT_MCP_HOST
     isolated: bool = False
@@ -151,7 +149,6 @@ def _mcp_config_payload_get(
             viewport_height=config.viewport_height,
             viewport_width=config.viewport_width,
         ),
-        "channel": config.browser_channel,
         "chromiumSandbox": False,
         "headless": False,
     }

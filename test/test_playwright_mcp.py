@@ -113,6 +113,7 @@ def test_playwright_mcp_command_uses_runtime_context(monkeypatch: pytest.MonkeyP
     ]
     config_payload = json.loads(mcp_config_path.read_text(encoding="utf-8"))
     assert config_payload["browser"]["launchOptions"]["headless"] is False
+    assert "channel" not in config_payload["browser"]["launchOptions"]
     assert config_payload["browser"]["launchOptions"]["proxy"] == {
         "bypass": "<-loopback>",
         "server": "socks5://10.42.0.8:1080",
