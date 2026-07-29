@@ -33,4 +33,4 @@ RUN python -m pip install --root-user-action=ignore --no-cache-dir /tmp/workflow
 
 USER root
 
-ENTRYPOINT ["/usr/bin/tini", "--", "browser-runtime-container-entrypoint"]
+ENTRYPOINT ["/usr/bin/tini", "-s", "--", "browser-runtime-container-entrypoint"]
