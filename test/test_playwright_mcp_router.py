@@ -16,6 +16,8 @@ from browser_runtime.config import NetworkProxyConfig
 from browser_runtime.playwright_mcp import PlaywrightMcpConfig
 from browser_runtime.playwright_mcp_router import (
     _DEFAULT_CANDIDATE_ROOT_PATH,
+    _DEFAULT_EXECUTION_STATE_RESTORE_MARKER_PATH,
+    _EXECUTION_STATE_RESTORE_IDENTITY_HEADER,
     _EXECUTION_STATE_RESTORE_TOKEN_HEADER,
     McpPlaywrightProfileRouter,
     PlaywrightMcpBackendIdentity,
@@ -123,6 +125,9 @@ class RouterFixture:
         (self.secret_root_path / "playwright_profile").mkdir(parents=True)
         self.profile_root_path = tmp_path / "runtime" / "mcp_playwright_profile" / "profile"
         self.candidate_root_path = tmp_path / "candidate"
+        self.execution_state_restore_marker_path = (
+            tmp_path / "runtime" / "mcp_playwright_profile" / "execution_state_restore.json"
+        )
         self.backend_runtime_root_path = tmp_path / "runtime" / "playwright_mcp_backend"
         self.output_root_path = tmp_path / "output" / ".playwright-mcp"
         backend_config = PlaywrightMcpConfig(
@@ -149,6 +154,7 @@ class RouterFixture:
                 backend_config=backend_config,
                 backend_runtime_root_path=self.backend_runtime_root_path,
                 candidate_root_path=self.candidate_root_path,
+                execution_state_restore_marker_path=self.execution_state_restore_marker_path,
                 execution_state_restore_token=SecretStr("execution-state-restore-token"),
                 network_proxy_config=NetworkProxyConfig(
                     proxy_by_name_map={
@@ -367,7 +373,11 @@ def test_router_default_candidate_path_is_one_shared_runtime_directory(tmp_path:
     )
 
     assert _DEFAULT_CANDIDATE_ROOT_PATH == Path("/runtime/mcp_playwright_profile/writeback_candidate")
+    assert _DEFAULT_EXECUTION_STATE_RESTORE_MARKER_PATH == Path(
+        "/runtime/mcp_playwright_profile/execution_state_restore.json"
+    )
     assert config.candidate_root_path == _DEFAULT_CANDIDATE_ROOT_PATH
+    assert config.execution_state_restore_marker_path == _DEFAULT_EXECUTION_STATE_RESTORE_MARKER_PATH
 
 
 def test_router_cli_maps_allowed_hosts_to_backend_template_field(
@@ -586,6 +596,7 @@ def test_execution_state_restore_discards_attempt_local_browser_state(tmp_path: 
         restore_response = await fixture.client.post(
             "/runtime/execution-state-restore",
             headers={
+                _EXECUTION_STATE_RESTORE_IDENTITY_HEADER: "execution-1",
                 _EXECUTION_STATE_RESTORE_TOKEN_HEADER: "execution-state-restore-token",
             },
         )
@@ -594,6 +605,9 @@ def test_execution_state_restore_discards_attempt_local_browser_state(tmp_path: 
         assert backend.stop_count == 1
         assert fixture.router._backend_by_identity_map == {}
         assert fixture.router._backend_port_set == set()
+        marker_payload = json.loads(fixture.execution_state_restore_marker_path.read_text(encoding="utf-8"))
+        assert marker_payload["restore_identity"] == "execution-1"
+        assert len(marker_payload["signature"]) == 64
         for root_path in [
             fixture.router.config.backend_runtime_root_path,
             fixture.router.config.candidate_root_path,
@@ -609,6 +623,52 @@ def test_execution_state_restore_discards_attempt_local_browser_state(tmp_path: 
         resumed_profile_path = fixture.profile_path_get("target")
         assert resumed_profile_path.joinpath("accepted.txt").read_text(encoding="utf-8") == "accepted"
         assert not resumed_profile_path.joinpath("unaccepted.txt").exists()
+
+    _router_test(run, tmp_path)
+
+
+def test_execution_state_restore_is_idempotent_for_one_execution_identity(tmp_path: Path) -> None:
+    """Do not erase state again when the controller repeats one completed request."""
+
+    async def run(fixture: RouterFixture) -> None:
+        header_by_name_map = {
+            _EXECUTION_STATE_RESTORE_IDENTITY_HEADER: "execution-1",
+            _EXECUTION_STATE_RESTORE_TOKEN_HEADER: "execution-state-restore-token",
+        }
+        first_response = await fixture.client.post(
+            "/runtime/execution-state-restore",
+            headers=header_by_name_map,
+        )
+        assert first_response.status == 204
+        fixture.candidate_root_path.mkdir(parents=True, exist_ok=True)
+        repeated_state_path = fixture.candidate_root_path / "repeated-state.txt"
+        repeated_state_path.write_text("preserved", encoding="utf-8")
+
+        repeated_response = await fixture.client.post(
+            "/runtime/execution-state-restore",
+            headers=header_by_name_map,
+        )
+
+        assert repeated_response.status == 204
+        assert repeated_state_path.read_text(encoding="utf-8") == "preserved"
+
+        forged_marker_payload = json.loads(
+            fixture.execution_state_restore_marker_path.read_text(encoding="utf-8")
+        )
+        forged_marker_payload["restore_identity"] = "execution-2"
+        fixture.execution_state_restore_marker_path.write_text(
+            json.dumps(forged_marker_payload),
+            encoding="utf-8",
+        )
+        next_response = await fixture.client.post(
+            "/runtime/execution-state-restore",
+            headers={
+                **header_by_name_map,
+                _EXECUTION_STATE_RESTORE_IDENTITY_HEADER: "execution-2",
+            },
+        )
+        assert next_response.status == 204
+        assert not repeated_state_path.exists()
 
     _router_test(run, tmp_path)
 
@@ -641,6 +701,7 @@ def test_execution_state_restore_rejects_unexpected_input(
             request_path,
             data=request_body,
             headers={
+                _EXECUTION_STATE_RESTORE_IDENTITY_HEADER: "execution-1",
                 _EXECUTION_STATE_RESTORE_TOKEN_HEADER: "execution-state-restore-token",
             },
         )
@@ -669,8 +730,8 @@ def test_execution_state_restore_requires_platform_credential(
     _router_test(run, tmp_path)
 
 
-def test_execution_state_restore_waits_for_in_flight_browser_request(tmp_path: Path) -> None:
-    """Never reset profile state while an accepted router request is active."""
+def test_execution_state_restore_interrupts_stale_in_flight_browser_request(tmp_path: Path) -> None:
+    """Interrupt predecessor streams after the platform has proven its stop."""
 
     async def run(fixture: RouterFixture) -> None:
         async with ClientSession() as browser_client, ClientSession() as restore_client:
@@ -682,19 +743,17 @@ def test_execution_state_restore_waits_for_in_flight_browser_request(tmp_path: P
                 restore_client.post(
                     fixture.client.make_url("/runtime/execution-state-restore"),
                     headers={
+                        _EXECUTION_STATE_RESTORE_IDENTITY_HEADER: "execution-1",
                         _EXECUTION_STATE_RESTORE_TOKEN_HEADER: "execution-state-restore-token",
                     },
                 )
             )
-            await asyncio.sleep(0.05)
 
-            assert not backend.stop_request_started.is_set()
-
-            fixture.hold_response_body_release.set()
-            assert await browser_response.read() == b'{"held": true}'
             restore_response = await asyncio.wait_for(restore_request, timeout=1)
             assert restore_response.status == 204
+            assert backend.stop_request_started.is_set()
             assert backend.stop_count == 1
+            browser_response.close()
 
     _router_test(run, tmp_path)
 

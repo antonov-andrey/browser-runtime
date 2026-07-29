@@ -13,6 +13,7 @@ import shutil
 import socket
 from itertools import combinations
 from pathlib import Path
+from tempfile import mkstemp
 from typing import Protocol, Self
 
 from aiohttp import ClientConnectionResetError, ClientResponse, ClientSession, ClientTimeout, web
@@ -39,6 +40,9 @@ from browser_runtime.playwright_mcp import (
 from browser_runtime.playwright_profile import playwright_profile_replace, playwright_profile_snapshot
 
 _DEFAULT_CANDIDATE_ROOT_PATH = Path("/runtime/mcp_playwright_profile/writeback_candidate")
+_DEFAULT_EXECUTION_STATE_RESTORE_MARKER_PATH = Path(
+    "/runtime/mcp_playwright_profile/execution_state_restore.json"
+)
 _DEFAULT_MCP_BACKEND_RUNTIME_ROOT_PATH = Path("/runtime/playwright_mcp_backend")
 _DEFAULT_MCP_OUTPUT_ROOT_PATH = Path("/output/.playwright-mcp")
 _DEFAULT_PROFILE_ROOT_PATH = Path("/runtime/mcp_playwright_profile/profile")
@@ -55,6 +59,7 @@ _HOP_BY_HOP_HEADER_NAME_SET = {
 _PROFILE_NAME_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,126}[A-Za-z0-9])?")
 _ROUTER_QUERY_NAME_SET = {"network_proxy_name", "profile", "profile_source"}
 _EXECUTION_STATE_RESTORE_PATH = "/runtime/execution-state-restore"
+_EXECUTION_STATE_RESTORE_IDENTITY_HEADER = "X-Browser-Runtime-Execution-State-Restore-Identity"
 _EXECUTION_STATE_RESTORE_TOKEN_HEADER = "X-Browser-Runtime-Execution-State-Restore-Token"
 _WRITEBACK_CANDIDATE_PATH = "/runtime/mcp-playwright-profile/writeback-candidate"
 
@@ -164,6 +169,7 @@ class PlaywrightMcpRouterConfig(BaseModel):
     backend_config: PlaywrightMcpConfig
     backend_runtime_root_path: Path = _DEFAULT_MCP_BACKEND_RUNTIME_ROOT_PATH
     candidate_root_path: Path = _DEFAULT_CANDIDATE_ROOT_PATH
+    execution_state_restore_marker_path: Path = _DEFAULT_EXECUTION_STATE_RESTORE_MARKER_PATH
     execution_state_restore_token: SecretStr = Field(min_length=1)
     host: str = "0.0.0.0"
     network_proxy_config: NetworkProxyConfig
@@ -195,6 +201,12 @@ class PlaywrightMcpRouterConfig(BaseModel):
                 or second_path.is_relative_to(first_path)
             ):
                 raise ValueError("router runtime, candidate, output, and profile roots must be disjoint")
+        if any(
+            self.execution_state_restore_marker_path == root_path
+            or self.execution_state_restore_marker_path.is_relative_to(root_path)
+            for root_path in root_path_list
+        ):
+            raise ValueError("execution state restore marker must be outside mutable browser roots")
         return self
 
 
@@ -219,6 +231,7 @@ class McpPlaywrightProfileRouter:
         self._backend_port_set: set[int] = set()
         self._candidate_lock = asyncio.Lock()
         self._client_session: ClientSession | None = None
+        self._execution_proxy_task_set: set[asyncio.Task[object]] = set()
         self._execution_state_condition = asyncio.Condition()
         self._execution_state_restore_in_progress = False
         self._leased_request_count = 0
@@ -237,7 +250,7 @@ class McpPlaywrightProfileRouter:
     async def request_proxy(self, request: web.Request) -> web.StreamResponse:
         """Proxy one MCP request through the backend selected by the route query."""
 
-        async with self._request_lease():
+        async with self._request_lease(is_interruptible=True):
             return await self._request_proxy(request)
 
     async def _request_proxy(self, request: web.Request) -> web.StreamResponse:
@@ -290,7 +303,7 @@ class McpPlaywrightProfileRouter:
     async def writeback_candidate_publish(self, request: web.Request) -> web.Response:
         """Stop one named backend and atomically publish its current profile."""
 
-        async with self._request_lease():
+        async with self._request_lease(is_interruptible=False):
             return await self._writeback_candidate_publish(request)
 
     async def _writeback_candidate_publish(self, request: web.Request) -> web.Response:
@@ -319,29 +332,52 @@ class McpPlaywrightProfileRouter:
                 self.config.execution_state_restore_token.get_secret_value(),
             ):
                 raise web.HTTPForbidden(text="execution state restore credential is invalid")
+            restore_identity_list = request.headers.getall(_EXECUTION_STATE_RESTORE_IDENTITY_HEADER, [])
+            if len(restore_identity_list) != 1:
+                raise ValueError("execution state restore requires one exact identity")
+            restore_identity = restore_identity_list[0]
+            if (
+                not restore_identity
+                or len(restore_identity) > 255
+                or not restore_identity.isascii()
+                or any(character.isspace() or not character.isprintable() for character in restore_identity)
+            ):
+                raise ValueError("execution state restore identity must be one printable ASCII token")
             if request.query:
                 raise ValueError("execution state restore does not accept query parameters")
             if await request.read():
                 raise ValueError("execution state restore request body must be empty")
             async with self._execution_state_restore_scope():
+                if self._execution_state_restore_is_completed(restore_identity=restore_identity):
+                    return web.Response(status=204)
                 await self._backend_list_stop()
                 await asyncio.to_thread(self._mutable_state_reset)
                 self._backend_state_forget()
+                await asyncio.to_thread(
+                    self._execution_state_restore_mark_completed,
+                    restore_identity=restore_identity,
+                )
             return web.Response(status=204)
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
 
     @asynccontextmanager
-    async def _request_lease(self) -> AsyncIterator[None]:
+    async def _request_lease(self, *, is_interruptible: bool) -> AsyncIterator[None]:
         """Keep mutable browser state stable for one complete router request."""
 
+        current_task = asyncio.current_task()
+        if current_task is None:
+            raise RuntimeError("browser request lease requires one current asyncio task")
         async with self._execution_state_condition:
             await self._execution_state_condition.wait_for(lambda: not self._execution_state_restore_in_progress)
             self._leased_request_count += 1
+            if is_interruptible:
+                self._execution_proxy_task_set.add(current_task)
         try:
             yield
         finally:
             async with self._execution_state_condition:
+                self._execution_proxy_task_set.discard(current_task)
                 self._leased_request_count -= 1
                 self._execution_state_condition.notify_all()
 
@@ -350,16 +386,76 @@ class McpPlaywrightProfileRouter:
         """Exclude router requests while all mutable browser state changes."""
 
         async with self._execution_state_condition:
-            await self._execution_state_condition.wait_for(
-                lambda: not self._execution_state_restore_in_progress and self._leased_request_count == 0
-            )
+            await self._execution_state_condition.wait_for(lambda: not self._execution_state_restore_in_progress)
             self._execution_state_restore_in_progress = True
+            execution_proxy_task_list = list(self._execution_proxy_task_set)
+        for execution_proxy_task in execution_proxy_task_list:
+            execution_proxy_task.cancel()
+        if execution_proxy_task_list:
+            await asyncio.gather(*execution_proxy_task_list, return_exceptions=True)
+        async with self._execution_state_condition:
+            await self._execution_state_condition.wait_for(lambda: self._leased_request_count == 0)
         try:
             yield
         finally:
             async with self._execution_state_condition:
                 self._execution_state_restore_in_progress = False
                 self._execution_state_condition.notify_all()
+
+    def _execution_state_restore_is_completed(self, *, restore_identity: str) -> bool:
+        """Return whether the exact authenticated restore already completed."""
+
+        marker_path = self.config.execution_state_restore_marker_path
+        if marker_path.is_symlink() or not marker_path.is_file():
+            return False
+        try:
+            marker_payload = json.loads(marker_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return False
+        if not isinstance(marker_payload, dict) or set(marker_payload) != {"restore_identity", "signature"}:
+            return False
+        marker_identity = marker_payload.get("restore_identity")
+        marker_signature = marker_payload.get("signature")
+        if marker_identity != restore_identity or not isinstance(marker_signature, str):
+            return False
+        return hmac.compare_digest(
+            marker_signature,
+            self._execution_state_restore_signature_get(restore_identity=restore_identity),
+        )
+
+    def _execution_state_restore_mark_completed(self, *, restore_identity: str) -> None:
+        """Atomically persist one authenticated completed-restore identity."""
+
+        marker_path = self.config.execution_state_restore_marker_path
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_payload = {
+            "restore_identity": restore_identity,
+            "signature": self._execution_state_restore_signature_get(restore_identity=restore_identity),
+        }
+        file_descriptor, temporary_path_raw = mkstemp(
+            dir=marker_path.parent,
+            prefix=f".{marker_path.name}.",
+            suffix=".tmp",
+        )
+        temporary_path = Path(temporary_path_raw)
+        try:
+            with os.fdopen(file_descriptor, "w", encoding="utf-8") as temporary_file:
+                json.dump(marker_payload, temporary_file, sort_keys=True)
+                temporary_file.write("\n")
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+            os.replace(temporary_path, marker_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+
+    def _execution_state_restore_signature_get(self, *, restore_identity: str) -> str:
+        """Return one credential-bound signature for a completed restore identity."""
+
+        return hmac.digest(
+            self.config.execution_state_restore_token.get_secret_value().encode(),
+            restore_identity.encode(),
+            "sha256",
+        ).hex()
 
     async def _backend_list_stop(self) -> None:
         """Stop every current backend before shared state changes."""
@@ -672,6 +768,11 @@ def _args_parse() -> argparse.Namespace:
     )
     parser.add_argument("--backend-runtime-root-path", default=_DEFAULT_MCP_BACKEND_RUNTIME_ROOT_PATH, type=Path)
     parser.add_argument("--candidate-root-path", default=_DEFAULT_CANDIDATE_ROOT_PATH, type=Path)
+    parser.add_argument(
+        "--execution-state-restore-marker-path",
+        default=_DEFAULT_EXECUTION_STATE_RESTORE_MARKER_PATH,
+        type=Path,
+    )
     parser.add_argument("--secret-root-path", required=True, type=Path)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--locale", default=DEFAULT_BROWSER_LOCALE)
@@ -714,6 +815,7 @@ def main() -> None:
     network_proxy_config_path = argument_by_name_map.pop("network_proxy_config_path")
     backend_runtime_root_path = argument_by_name_map.pop("backend_runtime_root_path")
     candidate_root_path = argument_by_name_map.pop("candidate_root_path")
+    execution_state_restore_marker_path = argument_by_name_map.pop("execution_state_restore_marker_path")
     output_root_path = argument_by_name_map.pop("output_root_path")
     profile_root_path = argument_by_name_map.pop("profile_root_path")
     backend_config = PlaywrightMcpConfig(
@@ -729,6 +831,7 @@ def main() -> None:
         backend_config=backend_config,
         backend_runtime_root_path=backend_runtime_root_path,
         candidate_root_path=candidate_root_path,
+        execution_state_restore_marker_path=execution_state_restore_marker_path,
         execution_state_restore_token=SecretStr(os.environ["BrowserRuntimeExecutionStateRestoreToken"]),
         host=host,
         network_proxy_config=NetworkProxyConfig.from_path(network_proxy_config_path),
