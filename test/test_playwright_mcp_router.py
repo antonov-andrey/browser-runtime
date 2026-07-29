@@ -10,12 +10,13 @@ from pathlib import Path
 import pytest
 from aiohttp import ClientConnectionResetError, ClientSession, web
 from aiohttp.test_utils import TestClient, TestServer
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from browser_runtime.config import NetworkProxyConfig
 from browser_runtime.playwright_mcp import PlaywrightMcpConfig
 from browser_runtime.playwright_mcp_router import (
     _DEFAULT_CANDIDATE_ROOT_PATH,
+    _EXECUTION_STATE_RESTORE_TOKEN_HEADER,
     McpPlaywrightProfileRouter,
     PlaywrightMcpBackendIdentity,
     PlaywrightMcpRouterConfig,
@@ -122,6 +123,8 @@ class RouterFixture:
         (self.secret_root_path / "playwright_profile").mkdir(parents=True)
         self.profile_root_path = tmp_path / "runtime" / "mcp_playwright_profile" / "profile"
         self.candidate_root_path = tmp_path / "candidate"
+        self.backend_runtime_root_path = tmp_path / "runtime" / "playwright_mcp_backend"
+        self.output_root_path = tmp_path / "output" / ".playwright-mcp"
         backend_config = PlaywrightMcpConfig(
             allowed_host_list=["*"] if allowed_host_list is None else allowed_host_list,
             secret_root_path=self.secret_root_path,
@@ -144,18 +147,25 @@ class RouterFixture:
         self.router = McpPlaywrightProfileRouter(
             config=PlaywrightMcpRouterConfig(
                 backend_config=backend_config,
+                backend_runtime_root_path=self.backend_runtime_root_path,
                 candidate_root_path=self.candidate_root_path,
+                execution_state_restore_token=SecretStr("execution-state-restore-token"),
                 network_proxy_config=NetworkProxyConfig(
                     proxy_by_name_map={
                         "user-a/proxy_a": "socks5://proxy-a:1080",
                         "user-b/proxy_b": "socks5://proxy-b:1080",
                     }
                 ),
+                output_root_path=self.output_root_path,
                 profile_root_path=self.profile_root_path,
             ),
             backend_factory=backend_factory,
         )
         application = web.Application()
+        application.router.add_post(
+            "/runtime/execution-state-restore",
+            self.router.execution_state_restore,
+        )
         application.router.add_post(
             "/runtime/mcp-playwright-profile/writeback-candidate",
             self.router.writeback_candidate_publish,
@@ -352,6 +362,7 @@ def test_router_default_candidate_path_is_one_shared_runtime_directory(tmp_path:
 
     config = PlaywrightMcpRouterConfig(
         backend_config=backend_config,
+        execution_state_restore_token=SecretStr("execution-state-restore-token"),
         network_proxy_config=NetworkProxyConfig(proxy_by_name_map={}),
     )
 
@@ -545,6 +556,145 @@ def test_candidate_endpoint_rejects_nonempty_body_and_duplicate_profile(tmp_path
         assert body_response.status == 400
         assert duplicate_response.status == 400
         assert fixture.backend_by_profile_map == {}
+
+    _router_test(run, tmp_path)
+
+
+def test_execution_state_restore_discards_attempt_local_browser_state(tmp_path: Path) -> None:
+    """Restore the next execution from the current immutable accepted source."""
+
+    async def run(fixture: RouterFixture) -> None:
+        response = await fixture.client.post("/mcp?profile=target")
+        assert response.status == 200
+        backend = fixture.backend_by_profile_map["target"]
+        fixture.profile_path_get("target").joinpath("unaccepted.txt").write_text(
+            "unaccepted",
+            encoding="utf-8",
+        )
+        for root_path in [
+            fixture.router.config.backend_runtime_root_path,
+            fixture.router.config.candidate_root_path,
+            fixture.router.config.output_root_path,
+        ]:
+            root_path.mkdir(parents=True, exist_ok=True)
+            root_path.joinpath("stale.txt").write_text("stale", encoding="utf-8")
+        fixture.secret_root_path.joinpath("playwright_profile", "accepted.txt").write_text(
+            "accepted",
+            encoding="utf-8",
+        )
+
+        restore_response = await fixture.client.post(
+            "/runtime/execution-state-restore",
+            headers={
+                _EXECUTION_STATE_RESTORE_TOKEN_HEADER: "execution-state-restore-token",
+            },
+        )
+
+        assert restore_response.status == 204
+        assert backend.stop_count == 1
+        assert fixture.router._backend_by_identity_map == {}
+        assert fixture.router._backend_port_set == set()
+        for root_path in [
+            fixture.router.config.backend_runtime_root_path,
+            fixture.router.config.candidate_root_path,
+            fixture.router.config.output_root_path,
+            fixture.router.config.profile_root_path,
+        ]:
+            assert root_path.is_dir()
+            assert list(root_path.iterdir()) == []
+
+        resumed_response = await fixture.client.post("/mcp?profile=target")
+
+        assert resumed_response.status == 200
+        resumed_profile_path = fixture.profile_path_get("target")
+        assert resumed_profile_path.joinpath("accepted.txt").read_text(encoding="utf-8") == "accepted"
+        assert not resumed_profile_path.joinpath("unaccepted.txt").exists()
+
+    _router_test(run, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("request_path", "request_body", "error_text"),
+    [
+        (
+            "/runtime/execution-state-restore?unexpected=value",
+            b"",
+            "does not accept query parameters",
+        ),
+        (
+            "/runtime/execution-state-restore",
+            b"unexpected",
+            "request body must be empty",
+        ),
+    ],
+)
+def test_execution_state_restore_rejects_unexpected_input(
+    request_path: str,
+    request_body: bytes,
+    error_text: str,
+    tmp_path: Path,
+) -> None:
+    """Keep the platform restore command narrow and unambiguous."""
+
+    async def run(fixture: RouterFixture) -> None:
+        response = await fixture.client.post(
+            request_path,
+            data=request_body,
+            headers={
+                _EXECUTION_STATE_RESTORE_TOKEN_HEADER: "execution-state-restore-token",
+            },
+        )
+
+        assert response.status == 400
+        assert error_text in await response.text()
+
+    _router_test(run, tmp_path)
+
+
+@pytest.mark.parametrize("token", [None, "", "wrong-token"])
+def test_execution_state_restore_requires_platform_credential(
+    token: str | None,
+    tmp_path: Path,
+) -> None:
+    """Reject reset requests that do not carry the exact narrow credential."""
+
+    async def run(fixture: RouterFixture) -> None:
+        response = await fixture.client.post(
+            "/runtime/execution-state-restore",
+            headers={} if token is None else {_EXECUTION_STATE_RESTORE_TOKEN_HEADER: token},
+        )
+
+        assert response.status == 403
+
+    _router_test(run, tmp_path)
+
+
+def test_execution_state_restore_waits_for_in_flight_browser_request(tmp_path: Path) -> None:
+    """Never reset profile state while an accepted router request is active."""
+
+    async def run(fixture: RouterFixture) -> None:
+        async with ClientSession() as browser_client, ClientSession() as restore_client:
+            browser_request = asyncio.create_task(browser_client.post(fixture.client.make_url("/hold?profile=target")))
+            await asyncio.wait_for(fixture.hold_response_headers_sent.wait(), timeout=1)
+            browser_response = await asyncio.wait_for(browser_request, timeout=1)
+            backend = fixture.backend_by_profile_map["target"]
+            restore_request = asyncio.create_task(
+                restore_client.post(
+                    fixture.client.make_url("/runtime/execution-state-restore"),
+                    headers={
+                        _EXECUTION_STATE_RESTORE_TOKEN_HEADER: "execution-state-restore-token",
+                    },
+                )
+            )
+            await asyncio.sleep(0.05)
+
+            assert not backend.stop_request_started.is_set()
+
+            fixture.hold_response_body_release.set()
+            assert await browser_response.read() == b'{"held": true}'
+            restore_response = await asyncio.wait_for(restore_request, timeout=1)
+            assert restore_response.status == 204
+            assert backend.stop_count == 1
 
     _router_test(run, tmp_path)
 

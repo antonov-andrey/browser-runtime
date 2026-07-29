@@ -2,19 +2,22 @@
 
 import argparse
 import asyncio
+from collections.abc import AsyncIterator, Callable
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
+import hmac
 import json
+import os
 import re
+import shutil
 import socket
-from collections.abc import Callable
-from contextlib import AsyncExitStack
 from itertools import combinations
 from pathlib import Path
 from typing import Protocol, Self
 
 from aiohttp import ClientConnectionResetError, ClientResponse, ClientSession, ClientTimeout, web
 from multidict import CIMultiDict, MultiDict, MultiMapping
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from workflow_container_contract import network_proxy_name_validate
 
 from browser_runtime.config import (
@@ -51,6 +54,8 @@ _HOP_BY_HOP_HEADER_NAME_SET = {
 }
 _PROFILE_NAME_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,126}[A-Za-z0-9])?")
 _ROUTER_QUERY_NAME_SET = {"network_proxy_name", "profile", "profile_source"}
+_EXECUTION_STATE_RESTORE_PATH = "/runtime/execution-state-restore"
+_EXECUTION_STATE_RESTORE_TOKEN_HEADER = "X-Browser-Runtime-Execution-State-Restore-Token"
 _WRITEBACK_CANDIDATE_PATH = "/runtime/mcp-playwright-profile/writeback-candidate"
 
 
@@ -159,6 +164,7 @@ class PlaywrightMcpRouterConfig(BaseModel):
     backend_config: PlaywrightMcpConfig
     backend_runtime_root_path: Path = _DEFAULT_MCP_BACKEND_RUNTIME_ROOT_PATH
     candidate_root_path: Path = _DEFAULT_CANDIDATE_ROOT_PATH
+    execution_state_restore_token: SecretStr = Field(min_length=1)
     host: str = "0.0.0.0"
     network_proxy_config: NetworkProxyConfig
     output_root_path: Path = _DEFAULT_MCP_OUTPUT_ROOT_PATH
@@ -213,19 +219,29 @@ class McpPlaywrightProfileRouter:
         self._backend_port_set: set[int] = set()
         self._candidate_lock = asyncio.Lock()
         self._client_session: ClientSession | None = None
+        self._execution_state_condition = asyncio.Condition()
+        self._execution_state_restore_in_progress = False
+        self._leased_request_count = 0
         self._lock_by_identity_map: dict[PlaywrightMcpBackendIdentity, asyncio.Lock] = {}
 
     async def close(self) -> None:
         """Close all active internal backends and the proxy client session."""
 
-        for backend in self._backend_by_identity_map.values():
-            await backend.stop()
+        async with self._execution_state_restore_scope():
+            await self._backend_list_stop()
+            self._backend_state_forget()
         if self._client_session is not None:
             await self._client_session.close()
             self._client_session = None
 
     async def request_proxy(self, request: web.Request) -> web.StreamResponse:
         """Proxy one MCP request through the backend selected by the route query."""
+
+        async with self._request_lease():
+            return await self._request_proxy(request)
+
+    async def _request_proxy(self, request: web.Request) -> web.StreamResponse:
+        """Proxy one MCP request while holding an execution-state lease."""
 
         try:
             self._host_validate(request)
@@ -274,6 +290,12 @@ class McpPlaywrightProfileRouter:
     async def writeback_candidate_publish(self, request: web.Request) -> web.Response:
         """Stop one named backend and atomically publish its current profile."""
 
+        async with self._request_lease():
+            return await self._writeback_candidate_publish(request)
+
+    async def _writeback_candidate_publish(self, request: web.Request) -> web.Response:
+        """Publish one candidate while holding an execution-state lease."""
+
         try:
             self._host_validate(request)
             if await request.read():
@@ -285,6 +307,93 @@ class McpPlaywrightProfileRouter:
             return web.Response(status=204)
         except (FileNotFoundError, ValueError) as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
+
+    async def execution_state_restore(self, request: web.Request) -> web.Response:
+        """Discard all attempt-local browser state after predecessor stop proof."""
+
+        try:
+            self._host_validate(request)
+            token_list = request.headers.getall(_EXECUTION_STATE_RESTORE_TOKEN_HEADER, [])
+            if len(token_list) != 1 or not hmac.compare_digest(
+                token_list[0],
+                self.config.execution_state_restore_token.get_secret_value(),
+            ):
+                raise web.HTTPForbidden(text="execution state restore credential is invalid")
+            if request.query:
+                raise ValueError("execution state restore does not accept query parameters")
+            if await request.read():
+                raise ValueError("execution state restore request body must be empty")
+            async with self._execution_state_restore_scope():
+                await self._backend_list_stop()
+                await asyncio.to_thread(self._mutable_state_reset)
+                self._backend_state_forget()
+            return web.Response(status=204)
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+
+    @asynccontextmanager
+    async def _request_lease(self) -> AsyncIterator[None]:
+        """Keep mutable browser state stable for one complete router request."""
+
+        async with self._execution_state_condition:
+            await self._execution_state_condition.wait_for(lambda: not self._execution_state_restore_in_progress)
+            self._leased_request_count += 1
+        try:
+            yield
+        finally:
+            async with self._execution_state_condition:
+                self._leased_request_count -= 1
+                self._execution_state_condition.notify_all()
+
+    @asynccontextmanager
+    async def _execution_state_restore_scope(self) -> AsyncIterator[None]:
+        """Exclude router requests while all mutable browser state changes."""
+
+        async with self._execution_state_condition:
+            await self._execution_state_condition.wait_for(
+                lambda: not self._execution_state_restore_in_progress and self._leased_request_count == 0
+            )
+            self._execution_state_restore_in_progress = True
+        try:
+            yield
+        finally:
+            async with self._execution_state_condition:
+                self._execution_state_restore_in_progress = False
+                self._execution_state_condition.notify_all()
+
+    async def _backend_list_stop(self) -> None:
+        """Stop every current backend before shared state changes."""
+
+        await asyncio.gather(*(backend.stop() for backend in self._backend_by_identity_map.values()))
+
+    def _backend_state_forget(self) -> None:
+        """Forget stopped backend identities, ports, and pair locks."""
+
+        self._backend_by_identity_map.clear()
+        self._backend_port_set.clear()
+        self._lock_by_identity_map.clear()
+
+    def _mutable_state_reset(self) -> None:
+        """Clear attempt-local roots without replacing their mounted directories."""
+
+        for root_path in [
+            self.config.backend_runtime_root_path,
+            self.config.candidate_root_path,
+            self.config.output_root_path,
+            self.config.profile_root_path,
+        ]:
+            if root_path.is_symlink():
+                raise ValueError("browser mutable state root must not be a symbolic link")
+            if root_path.exists() and not root_path.is_dir():
+                raise ValueError("browser mutable state root must be one directory")
+            root_path.mkdir(parents=True, exist_ok=True)
+            for child_path in root_path.iterdir():
+                if child_path.is_symlink() or child_path.is_file():
+                    child_path.unlink()
+                elif child_path.is_dir():
+                    shutil.rmtree(child_path)
+                else:
+                    raise ValueError("browser mutable state contains an unsupported filesystem entry")
 
     async def _backend_request_get(
         self,
@@ -620,6 +729,7 @@ def main() -> None:
         backend_config=backend_config,
         backend_runtime_root_path=backend_runtime_root_path,
         candidate_root_path=candidate_root_path,
+        execution_state_restore_token=SecretStr(os.environ["BrowserRuntimeExecutionStateRestoreToken"]),
         host=host,
         network_proxy_config=NetworkProxyConfig.from_path(network_proxy_config_path),
         output_root_path=output_root_path,
@@ -628,6 +738,7 @@ def main() -> None:
     )
     router = McpPlaywrightProfileRouter(config=router_config)
     application = web.Application()
+    application.router.add_post(_EXECUTION_STATE_RESTORE_PATH, router.execution_state_restore)
     application.router.add_post(_WRITEBACK_CANDIDATE_PATH, router.writeback_candidate_publish)
     application.router.add_route("*", "/{path:.*}", router.request_proxy)
     application.on_cleanup.append(lambda application: router.close())

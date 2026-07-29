@@ -31,6 +31,8 @@ Named target без `profile_source` инициализирует pair-local cop
 
 `POST /runtime/mcp-playwright-profile/writeback-candidate?profile=<physical-profile>&network_proxy_name=<stable-name>` останавливает exact backend pair и атомарно заменяет единственную candidate directory из working copy. Побеждает последняя успешная publication. Proxy identity не становится частью profile bytes или writeback destination.
 
+`POST /runtime/execution-state-restore` является run-local platform command после доказанной остановки predecessor и требует отдельный `X-Browser-Runtime-Execution-State-Restore-Token`, переданный процессу только через `BrowserRuntimeExecutionStateRestoreToken`. Он ждёт завершения активных router requests, останавливает все backend pairs и удаляет только attempt-local browser state. После этого следующая execution начинает каждую пару из текущего immutable accepted profile source.
+
 ## Безопасность
 
 Browser и MCP processes выполняются non-root. Image не получает VPN secret, S3 credential, Product DB credential, Kubernetes API token или VPN control API. Network reachability предоставляется platform и не выводится из пользовательского input.
