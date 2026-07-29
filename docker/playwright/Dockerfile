@@ -10,9 +10,14 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl gnupg tini xauth xvfb \
     && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g npm@11.18.0 @playwright/mcp@0.0.77 playwright@1.61.1 \
-    && playwright install --with-deps chromium \
+    && npm install -g npm@11.18.0 @playwright/mcp@0.0.77 \
+    && playwright-mcp install-browser --with-deps chromium \
     && rm -rf /var/lib/apt/lists/*
+
+COPY docker/playwright/browser_install_verify.mjs /tmp/browser_install_verify.mjs
+
+RUN NPM_GLOBAL_ROOT="$(npm root -g)" node /tmp/browser_install_verify.mjs \
+    && rm /tmp/browser_install_verify.mjs
 
 COPY pyproject.toml ./
 COPY browser_runtime ./browser_runtime
