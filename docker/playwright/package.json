@@ -1,0 +1,9 @@
+{
+  "name": "browser-runtime-playwright",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "@playwright/mcp": "0.0.77",
+    "npm": "11.18.0"
+  }
+}

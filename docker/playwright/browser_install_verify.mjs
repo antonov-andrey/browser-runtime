@@ -1,13 +1,13 @@
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const npmGlobalRoot = process.env.NPM_GLOBAL_ROOT;
-if (!npmGlobalRoot) {
-  throw new Error("NPM_GLOBAL_ROOT is required");
+const npmPackageRoot = process.env.NPM_PACKAGE_ROOT;
+if (!npmPackageRoot) {
+  throw new Error("NPM_PACKAGE_ROOT is required");
 }
 
 const mcpPackagePath = require.resolve("@playwright/mcp/package.json", {
-  paths: [npmGlobalRoot],
+  paths: [npmPackageRoot],
 });
 const mcpRequire = createRequire(mcpPackagePath);
 const { chromium } = mcpRequire("playwright");

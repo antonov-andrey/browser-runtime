@@ -10,6 +10,8 @@ Runtime использует bundled Playwright Chromium, установленн
 
 Deployment передаёт exact Linux OCI target platform, определённую по eligible Kubernetes nodes, каждому build явно. Browser image обязан публиковать manifest/config той же platform и содержать доступный для неё bundled Chromium. Architecture builder process не является скрытым target, а hardcoded `linux/arm64` отсутствует.
 
+Product release разрешает supported base selectors ровно один раз в exact platform digests. Python build/runtime graph устанавливается из committed hash-locked requirements, а Node graph `@playwright/mcp` — из committed `package-lock.json` командой `npm ci`. Image не выполняет global либо незаблокированный `npm install`; browser verifier импортирует package из release-local `node_modules`.
+
 ## Граница Браузера И Proxy
 
 Платформа передаёт одну immutable `proxy_by_name_map`, где keys являются exact stable `{zitadel_user_id}/{vpn_config.name}`, а values — run-local SOCKS5 URL. Browser runtime не создаёт эту map и не читает VPN configuration, active Version, provider metadata или credentials.
