@@ -19,6 +19,18 @@ def test_playwright_image_uses_the_exact_locked_node_dependency_graph() -> None:
     assert "integrity" in package_lock_json["packages"]["node_modules/@playwright/mcp"]
 
 
+def test_playwright_image_uses_runtime_family_build_argument_names() -> None:
+    """Browser ownership must not introduce a consumer-specific Python image alias."""
+
+    dockerfile_text = (
+        Path(__file__).resolve().parents[1] / "docker/playwright/Dockerfile"
+    ).read_text(encoding="utf-8")
+
+    assert "ARG NODE_IMAGE\nARG PYTHON_IMAGE\n" in dockerfile_text
+    assert "FROM ${PYTHON_IMAGE}" in dockerfile_text
+    assert "PLAYWRIGHT_IMAGE" not in dockerfile_text
+
+
 def test_playwright_image_locks_the_contract_build_backend() -> None:
     """No-build-isolation contract installation includes its declared Hatchling backend."""
 

@@ -1,9 +1,9 @@
 ARG NODE_IMAGE
-ARG PLAYWRIGHT_IMAGE
+ARG PYTHON_IMAGE
 
 FROM ${NODE_IMAGE} AS node-runtime
 
-FROM ${PLAYWRIGHT_IMAGE}
+FROM ${PYTHON_IMAGE}
 
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false \
     PATH=/opt/browser-runtime-node/node_modules/.bin:${PATH} \

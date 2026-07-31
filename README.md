@@ -45,7 +45,7 @@ python -m pytest -q
 python -m compileall browser_runtime
 docker buildx build --load \
   --build-arg NODE_IMAGE=public.ecr.aws/docker/library/node:24-bookworm-slim \
-  --build-arg PLAYWRIGHT_IMAGE=public.ecr.aws/docker/library/python:3.14-slim-trixie \
+  --build-arg PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.14-slim-trixie \
   --build-context workflow_container_contract=../workflow-container-contract \
   -f docker/playwright/Dockerfile -t browser-runtime:local .
 ```
