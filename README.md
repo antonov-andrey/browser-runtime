@@ -44,11 +44,11 @@ python -m pip install -e ".[browser,test]"
 python -m pytest -q
 python -m compileall browser_runtime
 docker buildx build --load \
-  --build-arg NODE_IMAGE=docker.io/library/node:24-bookworm-slim \
-  --build-arg PLAYWRIGHT_IMAGE=docker.io/library/python:3.14-bookworm \
+  --build-arg NODE_IMAGE=public.ecr.aws/docker/library/node:24-bookworm-slim \
+  --build-arg PLAYWRIGHT_IMAGE=public.ecr.aws/docker/library/python:3.14-slim-trixie \
   --build-context workflow_container_contract=../workflow-container-contract \
   -f docker/playwright/Dockerfile -t browser-runtime:local .
 ```
 
 Product deployment определяет target platform по Kubernetes nodes и передаёт её build явно. Local build выше использует текущий Docker target и не является Product release identity.
-Product release сначала разрешает оба base selectors в exact digests. Python build/runtime dependencies устанавливаются только из hash-locked requirements, а `@playwright/mcp` и его transitive graph — только через committed `package-lock.json` и `npm ci`; global/moving `npm install` в image отсутствует.
+Product release сначала разрешает оба canonical family selectors в exact digests; browser runtime не вводит собственные distro-варианты Node или Debian Python. Python build/runtime dependencies устанавливаются только из hash-locked requirements, а `@playwright/mcp` и его transitive graph — только через committed `package-lock.json` и `npm ci`; global/moving `npm install` в image отсутствует.
