@@ -19,6 +19,15 @@ def test_playwright_image_uses_the_exact_locked_node_dependency_graph() -> None:
     assert "integrity" in package_lock_json["packages"]["node_modules/@playwright/mcp"]
 
 
+def test_playwright_image_locks_the_contract_build_backend() -> None:
+    """No-build-isolation contract installation includes its declared Hatchling backend."""
+
+    image_root_path = Path(__file__).resolve().parents[1] / "docker/playwright"
+
+    assert "hatchling>=1.27" in (image_root_path / "build-requirements.txt").read_text(encoding="utf-8")
+    assert "\nhatchling==" in (image_root_path / "build-requirements.lock").read_text(encoding="utf-8")
+
+
 def test_browser_build_context_excludes_local_and_test_state() -> None:
     """A local build cannot send repository metadata, environments, or tests to BuildKit."""
 
