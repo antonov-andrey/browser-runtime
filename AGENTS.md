@@ -3,6 +3,7 @@
 ## Table Of Contents
 
 - [Required Standards](#required-standards)
+- [Key Directory Map](#key-directory-map)
 - [Scope](#scope)
 - [Python](#python)
 - [Verification](#verification)
@@ -33,6 +34,19 @@
 - `workflow-container-agent-tools:workflow-container-developer` applies to workflow-container runtime integration.
 
 If one required provider skill is unavailable, continue read-only discovery only and do not mutate this repository until the provider is restored.
+
+## Key Directory Map
+
+```text
+project/
+  .spec/
+  .worktree/
+  worktree-bootstrap.toml
+```
+
+- `.spec/` binds this repository's harness-neutral task-artifact root to the reusable semantics owned by `agent-workflows:goal-brainstorm`.
+- `.worktree/` is the task-worktree container whose reusable semantics are owned by `agent-workflows:goal-brainstorm`.
+- `worktree-bootstrap.toml` binds this repository's bootstrap resources to the reusable manifest contract owned by `agent-workflows:goal-brainstorm`.
 
 ## Scope
 - This repository owns the reusable browser runtime capability only.

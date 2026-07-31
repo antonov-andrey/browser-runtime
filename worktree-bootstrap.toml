@@ -1,0 +1,7 @@
+schema_version = 1
+
+[resource]
+copy_optional_path_list = []
+copy_required_path_list = []
+link_optional_path_list = []
+link_required_path_list = []
