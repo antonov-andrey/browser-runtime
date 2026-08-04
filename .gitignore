@@ -2,10 +2,8 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 .venv/
-.spec/
 build/
 dist/
 *.egg-info/
 doc/superpowers/
-/.spec
 /.worktree/
